@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Lookout</title>
+  <meta name="description" content="A globe of public live cameras: traffic, weather, city and wildlife feeds from around the world in one place.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/5.6.0/maplibre-gl.min.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="map" aria-label="Globe of camera locations"></div>
+  <div class="scan" aria-hidden="true"></div>
+
+  <!-- Left HUD: identity, counts, search, filters -->
+  <aside class="hud panel" id="hud">
+    <header class="hud-head">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <div>
+          <h1>Lookout</h1>
+          <p class="sub">live camera grid</p>
+        </div>
+      </div>
+      <button class="icon-btn hud-toggle" id="hudToggle" aria-label="Collapse panel" aria-expanded="true">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+      </button>
+    </header>
+
+    <div class="hud-body" id="hudBody">
+      <dl class="stats">
+        <div><dt>Live cams</dt><dd id="statTotal">—</dd></div>
+        <div><dt>Scenic</dt><dd id="statScenic">—</dd></div>
+        <div><dt>UTC</dt><dd id="clock">--:--:--</dd></div>
+      </dl>
+
+      <div class="search">
+        <label for="q" class="label">Search</label>
+        <input id="q" type="search" placeholder="City, road, place, source…" autocomplete="off" spellcheck="false">
+        <ul class="results" id="results" role="listbox" hidden></ul>
+      </div>
+
+      <div>
+        <span class="label">Type</span>
+        <div class="chips" id="catChips"></div>
+      </div>
+
+      <p class="showing dim">Showing <b id="statShown" class="mono">—</b> live streams</p>
+
+      <details class="sources">
+        <summary><span class="label">Sources</span> <span id="srcCount" class="mono dim"></span></summary>
+        <div class="src-actions"><button class="link-btn" id="srcAll">All</button><button class="link-btn" id="srcNone">None</button></div>
+        <ul id="srcList"></ul>
+      </details>
+    </div>
+  </aside>
+
+  <!-- Bottom action dock -->
+  <nav class="dock panel" aria-label="Actions">
+    <button class="dock-btn" id="btnTeleport" title="Fly to a random camera (R)">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 3v4M12 17v4M3 12h4M17 12h4" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="12" r="2" fill="currentColor"/></svg>
+      <span>Teleport</span>
+    </button>
+    <button class="dock-btn" id="btnTour" aria-pressed="false" title="Auto-tour the world (T)">
+      <svg viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z" fill="currentColor" class="play"/><path d="M7 5h3v14H7zM14 5h3v14h-3z" fill="currentColor" class="pause"/></svg>
+      <span>Auto-tour</span>
+    </button>
+    <button class="dock-btn" id="btnWall" title="Open your camera wall (W)">
+      <svg viewBox="0 0 24 24"><rect x="3" y="4" width="8" height="7" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="13" y="4" width="8" height="7" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="3" y="13" width="8" height="7" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="13" y="13" width="8" height="7" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+      <span>Wall <b id="wallCount" class="badge">0</b></span>
+    </button>
+  </nav>
+
+  <!-- Camera viewer -->
+  <section class="viewer panel" id="viewer" hidden aria-live="polite">
+    <header class="v-head">
+      <div class="v-titles">
+        <span class="v-kind" id="vKind"></span>
+        <h2 id="vTitle"></h2>
+        <p id="vRegion" class="dim"></p>
+      </div>
+      <button class="icon-btn" id="vClose" aria-label="Close viewer">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2"/></svg>
+      </button>
+    </header>
+    <div class="v-media" id="vMedia"></div>
+    <dl class="v-meta">
+      <div><dt>Position</dt><dd id="vPos" class="mono"></dd></div>
+      <div><dt>Feed</dt><dd id="vFeed" class="mono"></dd></div>
+      <div><dt>Source</dt><dd><a id="vSrc" target="_blank" rel="noopener"></a></dd></div>
+    </dl>
+    <div class="v-actions">
+      <button class="btn primary" id="vPin">Pin to wall</button>
+      <button class="btn" id="vNext">Next nearby</button>
+      <button class="btn" id="vShare">Copy link</button>
+    </div>
+    <div class="v-near">
+      <span class="label">Nearby feeds</span>
+      <ul id="vNear"></ul>
+    </div>
+  </section>
+
+  <!-- Multi-cam wall -->
+  <section class="wall" id="wall" hidden>
+    <header class="wall-head">
+      <h2>Camera wall</h2>
+      <p class="dim" id="wallHint">Pin cameras from the viewer to watch them side by side.</p>
+      <div class="wall-actions">
+        <button class="btn" id="wallClear">Unpin all</button>
+        <button class="btn primary" id="wallClose">Back to globe</button>
+      </div>
+    </header>
+    <div class="wall-grid" id="wallGrid"></div>
+  </section>
+
+  <div class="tip" id="tip" hidden></div>
+  <div class="toast" id="toast" hidden></div>
+  <div class="boot" id="boot"><span class="brand-mark" aria-hidden="true"></span><p>Loading camera grid…</p></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/5.6.0/maplibre-gl.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

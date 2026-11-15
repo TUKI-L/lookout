@@ -1,0 +1,14 @@
+{
+  "name": "lookout",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A globe of public live cameras in one place.",
+  "type": "module",
+  "scripts": {
+    "start": "node scripts/serve.mjs",
+    "data": "node scripts/build-cameras.mjs",
+    "youtube": "node scripts/curate-youtube.mjs",
+    "refresh": "node scripts/curate-youtube.mjs && node scripts/build-cameras.mjs"
+  },
+  "engines": { "node": ">=18" }
+}

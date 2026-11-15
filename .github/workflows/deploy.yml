@@ -1,0 +1,51 @@
+# Rebuilds the camera list every day and publishes ./public to GitHub Pages.
+name: Build & deploy Lookout
+
+# Manual-only while the repo is private (GitHub Pages needs a public repo on the free plan).
+# To publish: make the repo public, enable Pages (Source: GitHub Actions), then restore these triggers:
+#   push: { branches: [main] }
+#   schedule: [ { cron: '17 6 * * *' }, { cron: '47 5 * * 1' } ]
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Refresh YouTube stream IDs weekly (Mondays) and on manual runs. Keeps the old list if YouTube blocks the runner.
+      - name: Refresh YouTube live cams
+        if: github.event.schedule == '47 5 * * 1'
+        continue-on-error: true
+        run: node scripts/curate-youtube.mjs
+      - name: Build camera list
+        continue-on-error: true   # if every API is down, ship the committed list instead of failing
+        env:
+          WINDY_API_KEY: ${{ secrets.WINDY_API_KEY }}
+        run: node scripts/build-cameras.mjs
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,291 @@
+// Builds public/data/cameras.json: LIVE VIDEO cameras only (no refreshing snapshots, no recorded loops).
+// Run:  node scripts/build-cameras.mjs        (optionally set WINDY_API_KEY=... first)
+//
+// Sources: state transportation departments that publish public HLS video streams, curated 24/7 YouTube
+// live streams, and (with a free key) Windy webcams that have a live player.
+
+import { writeFile, readFile, mkdir } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+// Local secrets (e.g. WINDY_API_KEY) live in .env, which is git-ignored. Real env vars win.
+try {
+  for (const line of (await readFile(join(ROOT, '.env'), 'utf8')).split(/\r?\n/)) {
+    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
+    if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
+  }
+} catch {}
+const OUT = join(ROOT, 'public', 'data', 'cameras.json');
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
+
+// ---------- helpers ----------
+async function get(url, { type = 'json', headers = {}, timeout = 45000, tries = 3 } = {}) {
+  for (let i = 1; ; i++) {
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': UA, 'Accept-Encoding': 'gzip', ...headers }, signal: AbortSignal.timeout(timeout) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return type === 'json' ? await res.json() : await res.text();
+    } catch (e) {
+      if (i >= tries) throw e;
+      await new Promise(r => setTimeout(r, 1000 * i));
+    }
+  }
+}
+const round = n => Math.round(n * 1e5) / 1e5;
+const okCoord = (lat, lon) => Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 && !(lat === 0 && lon === 0);
+const isHls = u => /^https:\/\/.+\.m3u8(\?|$)/i.test(u || '') && !/token=|signature=|expires=/i.test(u);
+
+// Camera record (compact; expanded by the client):
+// { s: sourceKey, t: title, la, lo, k: 'hls'|'yt'|'windy', c: category, v?: hls url, poster?: jpg, yt?: id, w?: windy id, wp?: player url, r?: region }
+
+// ---------- 511-platform sites whose video streams are public ----------
+// (Georgia, Florida and Pennsylvania also list streams, but they need a session token from their own site.)
+const SITES_511 = [
+  ['nv', 'https://www.nvroads.com', 'NV Roads', 'Nevada, US'],
+  ['la', 'https://511la.org', '511 Louisiana', 'Louisiana, US'],
+  // These two refuse non-US networks; they fill in when the build runs on GitHub's US servers.
+  ['wi', 'https://511wi.gov', '511 Wisconsin', 'Wisconsin, US'],
+  ['ut', 'https://www.udottraffic.utah.gov', 'UDOT Traffic', 'Utah, US'],
+];
+
+// ---------- Caltrans (California): 12 districts, many with live HLS. Geo-blocks non-US networks. ----------
+async function fetchCaltrans() {
+  const districts = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+  const lists = await Promise.allSettled(districts.map(d =>
+    get(`https://cwwp2.dot.ca.gov/data/d${d}/cctv/cctvStatusD${String(d).padStart(2, '0')}.json`, { timeout: 20000, tries: 1 })));
+  if (lists.every(r => r.status === 'rejected')) throw new Error(lists[0].reason?.message || 'unreachable');
+  const out = [];
+  for (const r of lists) {
+    if (r.status !== 'fulfilled') continue;
+    for (const item of r.value.data || []) {
+      const c = item.cctv || {};
+      const L = c.location || {};
+      const la = +L.latitude, lo = +L.longitude;
+      const v = c.imageData?.streamingVideoURL;
+      if (c.inService === 'false' || !okCoord(la, lo) || !isHls(v)) continue;
+      out.push({ s: 'ca', t: L.locationName || `${L.route || ''} ${L.nearbyPlace || ''}`.trim() || 'Traffic camera', la: round(la), lo: round(lo), k: 'hls', c: 'traffic',
+        v, poster: c.imageData?.static?.currentImageURL || '', r: [L.nearbyPlace, L.county, 'California, US'].filter(Boolean).join(', ') });
+    }
+  }
+  return out;
+}
+async function fetch511([key, base, , region]) {
+  const PAGE = 100; // the server caps pages at 100 rows
+  const page = start => get(`${base}/List/GetData/Cameras?query=${encodeURIComponent(JSON.stringify({ columns: [{ data: null, name: '' }, { name: 'sortOrder', s: true }], order: [{ column: 1, dir: 'asc' }], start, length: PAGE, search: { value: '' } }))}&lang=en`);
+  const first = await page(0);
+  const pages = [first];
+  const starts = [];
+  for (let s = PAGE; s < (first.recordsTotal || 0); s += PAGE) starts.push(s);
+  for (let i = 0; i < starts.length; i += 6) pages.push(...await Promise.all(starts.slice(i, i + 6).map(page)));
+  const out = [];
+  for (const site of pages.flatMap(j => j.data || [])) {
+    const m = site.latLng?.geography?.wellKnownText?.match(/POINT \(([-\d.]+) ([-\d.]+)\)/);
+    if (!m) continue;
+    const lo = +m[1], la = +m[2];
+    const img = (site.images || []).find(i => !i.disabled && !i.blocked && !i.videoDisabled && !i.isVideoAuthRequired && isHls(i.videoUrl));
+    if (!okCoord(la, lo) || !img) continue;
+    const title = [site.location, img.description, site.roadway].map(x => (x || '').trim()).find(x => x && !/^n\/?a$/i.test(x)) || 'Traffic camera';
+    out.push({ s: key, t: title, la: round(la), lo: round(lo), k: 'hls', c: 'traffic', v: img.videoUrl, poster: base + img.imageUrl, r: [site.city, region].filter(Boolean).join(', ') });
+  }
+  return out;
+}
+
+// ---------- CARS platform states (Castle Rock) with public HLS ----------
+const CARS = [
+  ['mn', 'Minnesota 511', 'Minnesota, US', 'https://511mn.org'],
+  ['co', 'COtrip', 'Colorado, US', 'https://cotrip.org'],
+  ['ia', 'Iowa 511', 'Iowa, US', 'https://511ia.org'],
+  ['in', 'INDOT TrafficWise', 'Indiana, US', 'https://511in.org'], // currently fails the health check; kept in case it recovers
+];
+async function fetchCars([st, , region]) {
+  const list = await get(`https://${st}tg.carsprogram.org/cameras_v1/api/cameras`);
+  return list.filter(c => c.public !== false && c.active !== false).map(c => {
+    const la = c.location?.latitude, lo = c.location?.longitude;
+    const vid = (c.views || []).find(v => v.type === 'WMP' && isHls(v.url));
+    if (!okCoord(la, lo) || !vid) return null;
+    return { s: `cars_${st}`, t: (c.name || 'Traffic camera').trim(), la: round(la), lo: round(lo), k: 'hls', c: 'traffic', v: vid.url, poster: vid.videoPreviewUrl || '', r: [c.location?.routeId, region].filter(Boolean).join(', ') };
+  }).filter(Boolean);
+}
+
+// ---------- Missouri DOT ----------
+async function fetchMissouri() {
+  const list = await get('https://traveler.modot.org/timconfig/feed/desktop/StreamingCams2.json');
+  return list.filter(c => okCoord(c.y, c.x) && isHls(c.html)).map(c => ({
+    s: 'mo', t: c.location || 'Traffic camera', la: round(c.y), lo: round(c.x), k: 'hls', c: 'traffic', v: c.html, r: 'Missouri, US',
+  }));
+}
+
+// ---------- Delaware DOT ----------
+async function fetchDelaware() {
+  const j = await get('https://tmc.deldot.gov/json/videocamera.json');
+  return (j.videoCameras || []).filter(c => c.enabled !== false && c.status !== 'Unavailable' && okCoord(c.lat, c.lon) && isHls(c.urls?.m3u8s)).map(c => ({
+    s: 'de', t: c.title, la: round(c.lat), lo: round(c.lon), k: 'hls', c: 'traffic', v: c.urls.m3u8s, r: `${c.county ? c.county + ' County, ' : ''}Delaware, US`,
+  }));
+}
+
+// ---------- Windy webcams with a LIVE player (needs a free key: https://api.windy.com/keys) ----------
+const WINDY_CATS = { beach: 'beach', city: 'city', mountain: 'nature', lake: 'nature', forest: 'nature', park: 'nature', island: 'nature', coast: 'beach', harbor: 'city', airport: 'transport', traffic: 'traffic', meteo: 'weather', landscape: 'nature', building: 'city', square: 'city', sportarea: 'city', camping: 'nature', pool: 'city', resort: 'nature', water: 'nature', village: 'city', indoor: 'city', underwater: 'nature', animal: 'nature', observatory: 'weather', bay: 'beach', field: 'nature', river: 'nature', golf: 'nature', sky: 'weather' };
+async function fetchWindy(key) {
+  const headers = { 'x-windy-api-key': key };
+  const seen = new Map();
+  let scanned = 0;
+  // Returns the total match count so callers know whether the 1,050-result paging cap cut them off.
+  const grab = async params => {
+    let total = 0;
+    for (let offset = 0; offset <= 1000; offset += 50) {
+      const j = await get(`https://api.windy.com/webcams/api/v3/webcams?limit=50&offset=${offset}&include=location,categories,player&lang=en&${params}`, { headers });
+      total = j.total || 0;
+      for (const w of j.webcams || []) {
+        scanned++;
+        const L = w.location || {};
+        // Only webcams with a real live stream; Windy's day/month players are timelapses.
+        if (w.status !== 'active' || !w.player?.live || seen.has(w.webcamId) || !okCoord(L.latitude, L.longitude)) continue;
+        const cat = (w.categories || []).map(c => WINDY_CATS[c.id]).find(Boolean) || 'nature';
+        seen.set(w.webcamId, { s: 'windy', t: w.title, la: round(L.latitude), lo: round(L.longitude), k: 'windy', c: cat, w: w.webcamId, wp: w.player.live, r: [L.city, L.region, L.country].filter(Boolean).join(', ') });
+      }
+      if ((j.webcams || []).length < 50 || offset + 50 >= total) break;
+    }
+    return total;
+  };
+  const WINDY_CAT_IDS = Object.keys(WINDY_CATS);
+  // The free tier caps paging at offset 1000, so query country by country; countries with more webcams than
+  // that are split further by category. Finally sweep whole continents for anything left.
+  const country = async cc => {
+    const total = await grab(`countries=${cc}&sortKey=popularity&sortDirection=desc`);
+    if (total > 1050) for (const cat of WINDY_CAT_IDS) { try { await grab(`countries=${cc}&categories=${cat}`); } catch {} }
+  };
+  const COUNTRIES = 'US,CA,MX,BR,AR,CL,PE,CO,GB,IE,FR,DE,IT,ES,PT,NL,BE,CH,AT,PL,CZ,SK,HU,SI,HR,RS,BA,ME,AL,GR,TR,RO,BG,UA,NO,SE,FI,DK,IS,EE,LV,LT,JP,KR,CN,TW,HK,TH,VN,MY,SG,ID,PH,IN,NP,LK,AE,IL,EG,MA,ZA,KE,TZ,AU,NZ,FJ,PF,CU,DO,PR,BS,JM,CR,PA,UY,BO,EC,VE,LU,MT,CY,AD,MC,LI,FO,GL,GE,AM,KZ,MN,SA,QA,OM,JO,MV,MU,SC,NA,BW'.split(',');
+  for (let i = 0; i < COUNTRIES.length; i += 4) {
+    await Promise.all(COUNTRIES.slice(i, i + 4).map(cc => country(cc).catch(e => console.warn(`\n  windy ${cc}: ${e.message}`))));
+    process.stdout.write(`\r  windy: ${seen.size} live of ${scanned} scanned (${Math.min(i + 4, COUNTRIES.length)}/${COUNTRIES.length} countries)   `);
+  }
+  for (const ct of ['AF', 'AN', 'AS', 'EU', 'NA', 'OC', 'SA']) { try { await grab(`continents=${ct}&sortKey=popularity&sortDirection=desc`); } catch {} }
+  process.stdout.write('\n');
+  return [...seen.values()];
+}
+
+// ---------- curated YouTube 24/7 live streams (scripts/curate-youtube.mjs) ----------
+async function loadYoutube() {
+  try {
+    const list = JSON.parse(await readFile(join(ROOT, 'public', 'data', 'youtube.json'), 'utf8'));
+    // Strip hashtags, emoji and "LIVE" decorations so titles read like place names.
+    const clean = t => t.replace(/#\S+/g, '').replace(/[\u{1F1E6}-\u{1F1FF}\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{200B}]/gu, '')
+      .replace(/\b(live now|live)\b\s*[:|-]?\s*/gi, '').replace(/[|｜]\s*$/, '').replace(/\s{2,}/g, ' ').replace(/^[\s:|\-–—]+|[\s:|\-–—]+$/g, '').trim();
+    // Several streams can share one place: fan them out ~300 m apart so each dot stays clickable.
+    const seenAt = {};
+    for (const y of list) {
+      const k = `${y.la},${y.lo}`, n = seenAt[k] = (seenAt[k] ?? -1) + 1;
+      if (n) { const ang = n * 2.4; y.la = round(y.la + 0.003 * Math.sin(ang)); y.lo = round(y.lo + 0.003 * Math.cos(ang) / Math.cos(y.la * Math.PI / 180)); }
+    }
+    return list.map(y => ({ s: 'yt', t: clean(y.title) || y.place, la: y.la, lo: y.lo, k: 'yt', c: y.c || 'city', yt: y.id, r: y.place }));
+  } catch { return []; }
+}
+
+// ---------- main ----------
+const SOURCES = {
+  yt: { name: 'YouTube live streams', url: 'https://www.youtube.com/' },
+  windy: { name: 'Windy.com live webcams', url: 'https://www.windy.com/webcams' },
+  mo: { name: 'MoDOT Traveler', url: 'https://traveler.modot.org/' },
+  de: { name: 'DelDOT', url: 'https://deldot.gov/map/' },
+  ca: { name: 'Caltrans QuickMap', url: 'https://quickmap.dot.ca.gov/' },
+  ...Object.fromEntries(SITES_511.map(([k, base, name]) => [k, { name, url: base }])),
+  ...Object.fromEntries(CARS.map(([st, name, , url]) => [`cars_${st}`, { name, url }])),
+};
+
+const jobs = [
+  ...SITES_511.map(s => [s[2], () => fetch511(s)]),
+  ...CARS.map(c => [c[1], () => fetchCars(c)]),
+  ['MoDOT', fetchMissouri], ['DelDOT', fetchDelaware], ['Caltrans', fetchCaltrans],
+  ['YouTube (curated)', loadYoutube],
+];
+// SKIP_WINDY=1 reuses the Windy cams from the previous build (the full scan takes a while).
+if (process.env.SKIP_WINDY) console.log('(SKIP_WINDY set: reusing Windy cams from the previous build)');
+else if (process.env.WINDY_API_KEY) jobs.push(['Windy (live only)', () => fetchWindy(process.env.WINDY_API_KEY)]);
+else console.log('(WINDY_API_KEY not set: skipping Windy. Free key at https://api.windy.com/keys)');
+
+let previous = null;
+try { previous = JSON.parse(await readFile(OUT, 'utf8')); } catch {}
+
+const results = await Promise.all(jobs.map(async ([label, fn]) => {
+  const t0 = Date.now();
+  try { const cams = await fn(); console.log(`✔ ${label.padEnd(22)} ${String(cams.length).padStart(6)} live  (${((Date.now() - t0) / 1000).toFixed(1)}s)`); return cams; }
+  catch (e) { console.log(`✘ ${label.padEnd(22)} failed: ${e.message}`); return null; }
+}));
+let cams = results.flatMap(r => r || []);
+
+// A source that is down (or blocks this network) keeps its cameras from the previous build.
+if (previous?.cams) {
+  const have = new Set(cams.map(c => c.s));
+  const keepOld = previous.cams.filter(c => !have.has(c.s) && SOURCES[c.s] && (c.k === 'hls' || c.k === 'yt' || c.k === 'windy'));
+  if (keepOld.length) { cams = cams.concat(keepOld); console.log(`↺ kept ${keepOld.length} cams from the previous build for sources that failed this time`); }
+}
+
+// ---------- stream health check ----------
+// Request every HLS playlist the way a browser would (with an Origin header). Drop streams that answer with an
+// error or without CORS permission: those can never play on the site. Streams that simply time out are kept,
+// because that usually means *this* network is blocked (several US DOTs geo-block), not that the stream is down.
+async function healthCheck(list) {
+  const hls = list.filter(c => c.k === 'hls');
+  const bad = new Set();
+  let unknown = 0, i = 0;
+  const worker = async () => {
+    while (i < hls.length) {
+      const c = hls[i++];
+      try {
+        const res = await fetch(c.v, { headers: { 'User-Agent': UA, Origin: 'https://lookout.example' }, signal: AbortSignal.timeout(10000) });
+        const cors = res.headers.get('access-control-allow-origin');
+        const body = res.ok ? await res.text() : '';
+        if (!res.ok || !cors || !body.startsWith('#EXTM3U')) bad.add(c);
+      } catch { unknown++; }
+    }
+  };
+  await Promise.all(Array.from({ length: 32 }, worker));
+  console.log(`Health check: ${hls.length - bad.size - unknown} streams OK, ${bad.size} dead or not browser-playable (dropped), ${unknown} unreachable from here (kept).`);
+  return list.filter(c => !bad.has(c));
+}
+if (!process.env.SKIP_HEALTH) cams = await healthCheck(cams);
+
+// ---------- de-duplicate ----------
+// Same stream listed twice, and traffic cams every few hundred metres along one road (same view over and over):
+// keep one traffic cam per MIN_SPACING_KM. YouTube and Windy streams are never thinned.
+const MIN_SPACING_KM = Number(process.env.MIN_SPACING_KM ?? 1.0);
+const seenMedia = new Set();
+cams = cams.filter(c => {
+  const key = String(c.yt || c.w || c.v).replace(/[?#].*$/, '').toLowerCase();
+  if (seenMedia.has(key)) return false;
+  seenMedia.add(key);
+  return true;
+});
+const CELL = Math.max(MIN_SPACING_KM, 0.05) / 111;
+const grid = new Map();
+const km = (a, b) => {
+  const r = Math.PI / 180, dLa = (b.la - a.la) * r, dLo = (b.lo - a.lo) * r;
+  const h = Math.sin(dLa / 2) ** 2 + Math.cos(a.la * r) * Math.cos(b.la * r) * Math.sin(dLo / 2) ** 2;
+  return 12742 * Math.asin(Math.sqrt(h));
+};
+const kept = [];
+let dropped = 0;
+for (const c of cams) {
+  if (c.c === 'traffic' && MIN_SPACING_KM > 0) {
+    const ci = Math.floor(c.la / CELL), cj = Math.floor(c.lo / CELL);
+    const span = Math.min(40, Math.ceil(1 / Math.max(0.05, Math.cos(c.la * Math.PI / 180))));
+    let crowded = false;
+    for (let i = ci - 1; i <= ci + 1 && !crowded; i++)
+      for (let j = cj - span; j <= cj + span && !crowded; j++)
+        for (const o of grid.get(`${i}:${j}`) || []) if (km(c, o) < MIN_SPACING_KM) { crowded = true; break; }
+    if (crowded) { dropped++; continue; }
+    const k = `${ci}:${cj}`;
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(c);
+  }
+  kept.push(c);
+}
+console.log(`De-dup: dropped ${dropped} same-road repeats (< ${MIN_SPACING_KM} km apart).`);
+cams = kept;
+
+await mkdir(dirname(OUT), { recursive: true });
+await writeFile(OUT, JSON.stringify({ built: new Date().toISOString(), sources: SOURCES, cams }));
+const by = {};
+for (const c of cams) by[c.k] = (by[c.k] || 0) + 1;
+console.log(`\nWrote ${cams.length} live cameras → ${OUT}   ${JSON.stringify(by)}`);

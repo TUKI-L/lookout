@@ -1,0 +1,35 @@
+# Builds the camera list on GitHub's US servers (several US state DOTs refuse non-US networks) and offers the
+# result as a downloadable artifact. Publishes nothing.
+#   gh workflow run build-data.yml            then   gh run download --name cameras
+name: Build camera data (US network)
+
+on:
+  workflow_dispatch:
+    inputs:
+      windy:
+        description: 'Re-scan Windy (slow, ~30 min) instead of reusing the committed Windy cams'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build camera list
+        env:
+          WINDY_API_KEY: ${{ secrets.WINDY_API_KEY }}
+          SKIP_WINDY: ${{ inputs.windy && '' || '1' }}
+        run: node scripts/build-cameras.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cameras
+          path: public/data/cameras.json
+          retention-days: 7
