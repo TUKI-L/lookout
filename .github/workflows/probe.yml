@@ -1,9 +1,17 @@
-# Tests candidate camera endpoints from GitHub's US network (many state DOTs block other networks).
+# Tests camera endpoints from GitHub's US network (many state DOTs block other networks).
 # Prints status, size, CORS header and the first bytes of each response. Changes nothing.
+#   gh workflow run probe.yml -f urls="name1=https://… name2=https://…" -f bytes=1500
 name: Probe camera endpoints (US network)
 
 on:
   workflow_dispatch:
+    inputs:
+      urls:
+        description: 'Space-separated name=url pairs'
+        required: true
+      bytes:
+        description: 'How many bytes of each body to print'
+        default: '600'
 
 permissions:
   contents: read
@@ -13,42 +21,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Probe
+        env:
+          URLS: ${{ inputs.urls }}
+          BYTES: ${{ inputs.bytes }}
         run: |
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
-          probe() {
-            out=$(curl -sS -L -m 25 --compressed -A "$UA" -H "Origin: https://lookout.example" -D /tmp/h -o /tmp/b -w "%{http_code} %{size_download}" "$2" 2>&1 | tail -1)
+          for pair in $URLS; do
+            name="${pair%%=*}"; url="${pair#*=}"
+            out=$(curl -sS -L -m 25 --compressed -A "$UA" -H "Origin: https://lookout.example" -D /tmp/h -o /tmp/b -w "%{http_code} %{size_download}" "$url" 2>&1 | tail -1)
             cors=$(grep -i '^access-control-allow-origin' /tmp/h | tail -1 | tr -d '\r')
-            hls=$(grep -o 'm3u8' /tmp/b 2>/dev/null | wc -l)
-            echo "### $1 | $out | m3u8=$hls | ${cors:-no-cors}"
-            head -c 600 /tmp/b | tr '\n\r' '  '; echo; echo
-          }
-          probe alabama   "https://api.algotraffic.com/v3.0/Cameras"
-          probe maryland  "https://chart.maryland.gov/DataFeeds/GetCamerasJson"
-          probe maryland2 "https://chartexp1.sha.maryland.gov/CHARTExportClientService/getCameraMapDataJSON.do"
-          probe oklahoma  "https://oktraffic.org/api/CameraPoles"
-          probe arkansas  "https://layers.idrivearkansas.com/cameras.geojson"
-          probe tennessee "https://smartway.tn.gov/Traffic/api/Cameras/0"
-          probe tennessee2 "https://smartway.tn.gov/allcams"
-          probe mississippi "https://www.mdottraffic.com/default.aspx/LoadCameraData"
-          probe georgia   "https://511ga.org/List/GetData/Cameras?query=%7B%22start%22%3A0%2C%22length%22%3A2%7D&lang=en"
-          probe ga_video  "https://sfs-msc-pub-lq-01.navigator.dot.ga.gov/rtplive/ALPH-CCTV-0050/playlist.m3u8"
-          probe florida_v "https://fl511.com/List/GetData/Cameras?query=%7B%22start%22%3A0%2C%22length%22%3A2%7D&lang=en"
-          probe virginia  "https://www.511virginia.org/data/geojson/icons.cameras.geojson"
-          probe virginia2 "https://511.vdot.virginia.gov/services/map/layers/map/cams"
-          probe southcarolina "https://www.511sc.org/data/geojson/icons.cameras.geojson"
-          probe northcarolina "https://drivenc.gov/api/cameras"
-          probe kentucky  "https://services2.arcgis.com/CcI36Pduqd0OR4W9/arcgis/rest/services/trafficCamerasCur_Prd/FeatureServer/0/query?where=1%3D1&outFields=*&f=json&resultRecordCount=3"
-          probe texas_hou "https://traffic.houstontranstar.org/api/cameras"
-          probe newmexico "https://www.nmroads.com/mapIcons.json"
-          probe hawaii    "https://www.goakamai.org/api/cameras"
-          probe utah      "https://www.udottraffic.utah.gov/List/GetData/Cameras?query=%7B%22start%22%3A0%2C%22length%22%3A2%7D&lang=en"
-          probe ohio      "https://publicapi.ohgo.com/api/v1/cameras"
-          probe nyc       "https://webcams.nyctmc.org/api/cameras"
-          probe washington "https://wsdot.com/Traffic/api/HighwayCameras/HighwayCamerasREST.svc/GetCamerasAsJson"
-          probe oregon    "https://tripcheck.com/Scripts/map/data/cctvinventory.js"
-          probe montana   "https://app.mdt.mt.gov/atms/public/cameras"
-          probe wyoming   "https://map.wyoroad.info/wtimap/data/cameras.json"
-          probe northdakota "https://travelfiles.dot.nd.gov/geojson_nc/cameras.json"
-          probe idaho     "https://511.idaho.gov/List/GetData/Cameras?query=%7B%22start%22%3A0%2C%22length%22%3A2%7D&lang=en"
-          probe newyork   "https://511ny.org/List/GetData/Cameras?query=%7B%22start%22%3A0%2C%22length%22%3A2%7D&lang=en"
-          probe nj        "https://511nj.org/api/client/camera/getCameraList"
+            echo "### $name | $out | ${cors:-no-cors}"
+            head -c "$BYTES" /tmp/b | tr '\n\r' '  '; echo; echo
+          done
