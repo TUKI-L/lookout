@@ -375,7 +375,8 @@ if (previous?.cams && !process.env.ONLY) {
 // error or without CORS permission: those can never play on the site. Streams that simply time out are kept,
 // because that usually means *this* network is blocked (several US DOTs geo-block), not that the stream is down.
 async function healthCheck(list) {
-  const hls = list.filter(c => c.k === 'hls');
+  // Sources in GEO_BLOCKED were verified from a US network; this network would wrongly fail them.
+  const hls = list.filter(c => c.k === 'hls' && !GEO_BLOCKED.has(c.s));
   const bad = new Set();
   let unknown = 0, i = 0;
   const worker = async () => {
