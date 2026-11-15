@@ -116,6 +116,27 @@ async function fetchMissouri() {
   }));
 }
 
+// ---------- Arkansas (iDriveArkansas). Geo-blocks non-US networks. ----------
+async function fetchArkansas() {
+  const j = await get('https://layers.idrivearkansas.com/cameras.geojson');
+  return (j.features || []).map(f => {
+    const p = f.properties || {}, [lo, la] = f.geometry?.coordinates || [];
+    const v = (p.hls_stream_protected || p.hls_stream || '').replace(/\\\//g, '/');
+    if (p.status !== 'online' || !okCoord(la, lo) || !isHls(v)) return null;
+    return { s: 'ar', t: p.name?.trim() || 'Traffic camera', la: round(la), lo: round(lo), k: 'hls', c: 'traffic', v, r: [p.route_type_abbr && p.route ? `${p.route_type_abbr} ${p.route}` : '', 'Arkansas, US'].filter(Boolean).join(', ') };
+  }).filter(Boolean);
+}
+
+// ---------- Maryland CHART. Geo-blocks non-US networks. ----------
+// Stream URL pattern taken from CHART's own public video page: https://{cctvIp}/rtplive/{id}/playlist.m3u8
+async function fetchMaryland() {
+  const list = await get('https://chart.maryland.gov/DataFeeds/GetCamerasJson');
+  return (Array.isArray(list) ? list : list.data || []).map(c => {
+    if (c.commMode !== 'ONLINE' || c.opStatus !== 'OK' || !okCoord(c.lat, c.lon) || !c.cctvIp || !c.id) return null;
+    return { s: 'md', t: c.description || c.name, la: round(c.lat), lo: round(c.lon), k: 'hls', c: 'traffic', v: `https://${c.cctvIp}/rtplive/${c.id}/playlist.m3u8`, r: [c.cameraCategories?.[0], 'Maryland, US'].filter(Boolean).join(', ') };
+  }).filter(Boolean);
+}
+
 // ---------- Delaware DOT ----------
 async function fetchDelaware() {
   const j = await get('https://tmc.deldot.gov/json/videocamera.json');
@@ -189,6 +210,8 @@ const SOURCES = {
   mo: { name: 'MoDOT Traveler', url: 'https://traveler.modot.org/' },
   de: { name: 'DelDOT', url: 'https://deldot.gov/map/' },
   ca: { name: 'Caltrans QuickMap', url: 'https://quickmap.dot.ca.gov/' },
+  ar: { name: 'iDriveArkansas', url: 'https://www.idrivearkansas.com/' },
+  md: { name: 'Maryland CHART', url: 'https://chart.maryland.gov/' },
   ...Object.fromEntries(SITES_511.map(([k, base, name]) => [k, { name, url: base }])),
   ...Object.fromEntries(CARS.map(([st, name, , url]) => [`cars_${st}`, { name, url }])),
 };
@@ -198,6 +221,7 @@ const jobs = [
   ...SITES_511.map(s => [s[2], () => fetch511(s), s[0]]),
   ...CARS.map(c => [c[1], () => fetchCars(c), `cars_${c[0]}`]),
   ['MoDOT', fetchMissouri, 'mo'], ['DelDOT', fetchDelaware, 'de'], ['Caltrans', fetchCaltrans, 'ca'],
+  ['iDriveArkansas', fetchArkansas, 'ar'], ['Maryland CHART', fetchMaryland, 'md'],
   ['YouTube (curated)', loadYoutube, 'yt'],
 ];
 // GEO_BLOCKED=ca,ut,… : sources this network can't reach. They're skipped here and their cams are kept from the
