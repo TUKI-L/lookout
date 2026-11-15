@@ -19,7 +19,7 @@
     weather:   { label: 'Sky',       color: '#7ea8ff' },
     transport: { label: 'Transport', color: '#c59bff' },
   };
-  const FEED_LABEL = { hls: 'HLS live video', yt: 'YouTube live', windy: 'Windy live' };
+  const FEED_LABEL = { hls: 'HLS live video', yt: 'YouTube live', windy: 'Windy live', iframe: 'Live player', mjpeg: 'MJPEG live' };
 
   // ---------- tiny helpers ----------
   const $ = id => document.getElementById(id);
@@ -51,7 +51,7 @@
   }
   let toastTimer;
   function toast(msg) { const t = $('toast'); t.textContent = msg; t.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.hidden = true), 2200); }
-  const camKey = c => `${c.s}:${c.yt || c.w || c.v}`;
+  const camKey = c => `${c.s}:${c.yt || c.w || c.v || c.e || c.m}`;
 
   // ---------- state ----------
   const state = {
@@ -229,6 +229,16 @@
 
     if (cam.k === 'yt') {
       iframe(`https://www.youtube-nocookie.com/embed/${cam.yt}?autoplay=1&mute=1&playsinline=1&rel=0&modestbranding=1`);
+    } else if (cam.k === 'iframe') {
+      // The publisher's own embeddable live player (rtsp.me, ipcamlive, EarthCam, …).
+      iframe(cam.e);
+    } else if (cam.k === 'mjpeg') {
+      // Motion-JPEG: a continuous live stream the browser plays natively in an <img>.
+      const img = el('img', { src: cam.m, alt: cam.t, referrerpolicy: 'no-referrer' });
+      img.onload = () => { box.classList.remove('loading'); tag.textContent = 'LIVE'; tag.classList.add('live'); };
+      img.onerror = () => offline();
+      box.append(img, tag);
+      timers.push(setTimeout(() => { if (!img.complete || !img.naturalWidth) offline('No video arrived within 45 seconds.'); }, CONNECT_TIMEOUT_MS));
     } else if (cam.k === 'windy') {
       iframe(cam.wp || `https://webcams.windy.com/webcams/public/embed/player/${cam.w}/live`);
     } else {
@@ -310,7 +320,7 @@
     $('vFeed').textContent = FEED_LABEL[cam.k];
     const src = state.sources[cam.s] || { name: cam.s, url: '#' };
     $('vSrc').textContent = src.name;
-    $('vSrc').href = cam.k === 'yt' ? `https://www.youtube.com/watch?v=${cam.yt}` : cam.k === 'windy' ? `https://www.windy.com/webcams/${cam.w}` : src.url;
+    $('vSrc').href = cam.k === 'yt' ? `https://www.youtube.com/watch?v=${cam.yt}` : cam.k === 'windy' ? `https://www.windy.com/webcams/${cam.w}` : cam.page || src.url;
 
     showPlayer(cam);
     renderPinButton();

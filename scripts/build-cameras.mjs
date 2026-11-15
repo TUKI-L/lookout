@@ -137,6 +137,114 @@ async function fetchMaryland() {
   }).filter(Boolean);
 }
 
+// ---------- webcams.bg: Bulgaria's live-webcam network (~350 cams) ----------
+// The site's own map files (/1.map … /4.map) are tab-separated: lat, lon, title (linking to /{id}/{slug}/), town.
+// Each camera page then carries its current live stream: <video id="video_stream" src="….m3u8">, an MJPEG
+// <img id="mjpeg_stream">, or an <iframe id="iframe_stream">. Pages without any stream element are offline.
+async function fetchWebcamsBg() {
+  const BASE = 'https://www.webcams.bg';
+  const rows = [];
+  for (const n of [1, 2, 3, 4]) {
+    const tsv = await get(`${BASE}/${n}.map`, { type: 'text' });
+    for (const line of tsv.split(/\r?\n/).slice(1)) {
+      const [la, lo, titleHtml, town] = line.split('\t');
+      const href = titleHtml?.match(/href="(\/\d+\/[^"]+\/)"/)?.[1];
+      if (!href || !okCoord(+la, +lo)) continue;
+      const title = titleHtml.replace(/<[^>]+>/g, '').trim();
+      rows.push({ href, la: +la, lo: +lo, title, town: (town || '').replace(/^(гр|с|к\.к|м|в\.з)\.\s*/, '').trim(), cat: n });
+    }
+  }
+  const attr = (html, id, a) => html.match(new RegExp(`<[^>]*id="${id}"[^>]*\\b${a}="([^"]+)"`, 'i'))?.[1] || html.match(new RegExp(`<[^>]*\\b${a}="([^"]+)"[^>]*id="${id}"`, 'i'))?.[1];
+  const out = [];
+  let i = 0;
+  const worker = async () => {
+    while (i < rows.length) {
+      const r = rows[i++];
+      try {
+        const html = await get(BASE + r.href, { type: 'text', tries: 2, timeout: 20000 });
+        const hls = attr(html, 'video_stream', 'src');
+        const iframe = attr(html, 'iframe_stream', 'src');
+        const mjpeg = attr(html, 'mjpeg_stream', 'data-src') || attr(html, 'mjpeg_stream', 'src');
+        const poster = attr(html, 'video_stream', 'poster') || attr(html, 'jpeg_stream', 'src') || '';
+        const base = { s: 'bg', t: `${r.title}${r.town ? ', ' + r.town : ''}`, la: round(r.la), lo: round(r.lo), c: r.cat === 2 ? 'nature' : 'city', r: `${r.town}, Bulgaria`.replace(/^, /, ''), page: BASE + r.href };
+        if (isHls(hls)) out.push({ ...base, k: 'hls', v: hls, poster });
+        else if (/^https:\/\//.test(iframe || '') && !/rtsp\.me/i.test(iframe)) out.push({ ...base, k: 'iframe', e: iframe }); // no rtsp.me (owner billing screens)
+        else if (/^https:\/\//.test(mjpeg || '')) out.push({ ...base, k: 'mjpeg', m: mjpeg });
+      } catch {}
+    }
+  };
+  await Promise.all(Array.from({ length: 6 }, worker));
+  return out;
+}
+
+// ---------- shared: pull a live stream out of a webcam page ----------
+// Accepts only streams published through a named service or the owner's own HTTPS domain. Anything addressed by a
+// raw IP (e.g. http://212.25.48.117:8080/mjpg/video.mjpg) is skipped: that's the signature of cameras that are
+// merely reachable on the internet rather than deliberately published.
+const PUBLIC_HOST = u => { try { const x = new URL(u); return x.protocol === 'https:' && !/^\d{1,3}(\.\d{1,3}){3}$/.test(x.hostname) && !x.hostname.includes(':'); } catch { return false; } };
+function streamFromHtml(html) {
+  const yt = html.match(/youtube(?:-nocookie)?\.com\/embed\/([\w-]{11})/)?.[1];
+  if (yt) return { k: 'yt', yt };
+  for (const m of html.matchAll(/<iframe[^>]+src="([^"]+)"/gi)) {
+    const src = m[1].replace(/&amp;/g, '&');
+    // rtsp.me is deliberately excluded: it bills camera owners, and unpaid cams show a "Debt / Top up" screen
+    // in the player. The build can't tell paid from unpaid, and the grid must never show a payment prompt.
+    if (/^https:\/\/((?:www\.|g\d\.)?ipcamlive\.com\/player\/|[^/]*earthcam\.(?:com|net)\/|video\.nest\.com\/embed|player\.twitch\.tv)/i.test(src) && PUBLIC_HOST(src)) return { k: 'iframe', e: src };
+  }
+  for (const m of html.matchAll(/(https:\/\/[^"'\s<>]+\.m3u8[^"'\s<>]*)/gi)) if (isHls(m[1]) && PUBLIC_HOST(m[1])) return { k: 'hls', v: m[1] };
+  for (const m of html.matchAll(/(https:\/\/[^"'\s<>]+\/(?:mjpg\/video\.mjpg|[^"'\s<>]*\.mjpe?g))/gi)) if (PUBLIC_HOST(m[1])) return { k: 'mjpeg', m: m[1] };
+  return null;
+}
+const GAZ_BY_COUNTRY = {};
+let GAZ_LOADED = false;
+async function gazetteerPlace(name, cc) {
+  if (!GAZ_LOADED) {
+    for (const g of JSON.parse(await readFile(join(ROOT, 'scripts', 'data', 'gazetteer.json'), 'utf8'))) (GAZ_BY_COUNTRY[g.c] ||= []).push(g);
+    GAZ_LOADED = true;
+  }
+  const f = name.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  return (GAZ_BY_COUNTRY[cc] || []).filter(g => g.n.some(n => n.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '') === f)).sort((a, b) => b.p - a.p)[0] || null;
+}
+
+// ---------- free-webcambg.com: Bulgarian webcam directory (~350 cams, every major town) ----------
+// Camera pages are named "{City}-{NN}-…htm". The stream is on the page or one iframe level down.
+async function fetchFreeWebcamBg() {
+  const BASE = 'http://free-webcambg.com/';
+  const home = await get(BASE, { type: 'text' });
+  const pages = [...new Set([...home.matchAll(/href="([A-Z][A-Za-z-]+-\d{2,3}[^"]*\.html?)"/g)].map(m => m[1]))];
+  const out = [];
+  const perCity = {};
+  let i = 0;
+  const worker = async () => {
+    while (i < pages.length) {
+      const p = pages[i++];
+      try {
+        const city = p.match(/^([A-Za-z-]+?)-\d/)[1].replace(/-/g, ' ');
+        let html = await get(BASE + p, { type: 'text', tries: 2, timeout: 20000 });
+        let s = streamFromHtml(html);
+        if (!s) {
+          // One level down: the page's own player frame (skip ads, menus and image galleries).
+          for (const m of html.matchAll(/<iframe[^>]+src="([^"]+\.html?)"/gi)) {
+            if (/^(ad|image|https?:)/i.test(m[1])) continue;
+            s = streamFromHtml(await get(BASE + m[1], { type: 'text', tries: 1, timeout: 15000 }).catch(() => ''));
+            if (s) break;
+          }
+        }
+        if (!s) continue;
+        const g = await gazetteerPlace(city, 'BG');
+        if (!g) continue;
+        // Several cams per town: fan them out ~300 m apart so each dot is clickable.
+        const n = perCity[city] = (perCity[city] ?? -1) + 1;
+        const la = g.la + (n ? 0.003 * Math.sin(n * 2.4) : 0), lo = g.lo + (n ? 0.004 * Math.cos(n * 2.4) : 0);
+        const label = p.replace(/\.html?$/, '').replace(/-webcam.*$/i, '').replace(/^[A-Za-z]+-\d+-?/, '').replace(/-/g, ' ').trim();
+        out.push({ s: 'fwbg', t: `${g.n[0]}${label ? ' · ' + label : ''}`, la: round(la), lo: round(lo), c: 'city', r: `${g.n[0]}, Bulgaria`, page: BASE + p, ...s });
+      } catch {}
+    }
+  };
+  await Promise.all(Array.from({ length: 6 }, worker));
+  return out;
+}
+
 // ---------- Delaware DOT ----------
 async function fetchDelaware() {
   const j = await get('https://tmc.deldot.gov/json/videocamera.json');
@@ -212,6 +320,8 @@ const SOURCES = {
   ca: { name: 'Caltrans QuickMap', url: 'https://quickmap.dot.ca.gov/' },
   ar: { name: 'iDriveArkansas', url: 'https://www.idrivearkansas.com/' },
   md: { name: 'Maryland CHART', url: 'https://chart.maryland.gov/' },
+  bg: { name: 'Webcams.bg', url: 'https://www.webcams.bg/' },
+  fwbg: { name: 'free-webcambg.com', url: 'http://free-webcambg.com/' },
   ...Object.fromEntries(SITES_511.map(([k, base, name]) => [k, { name, url: base }])),
   ...Object.fromEntries(CARS.map(([st, name, , url]) => [`cars_${st}`, { name, url }])),
 };
@@ -222,8 +332,14 @@ const jobs = [
   ...CARS.map(c => [c[1], () => fetchCars(c), `cars_${c[0]}`]),
   ['MoDOT', fetchMissouri, 'mo'], ['DelDOT', fetchDelaware, 'de'], ['Caltrans', fetchCaltrans, 'ca'],
   ['iDriveArkansas', fetchArkansas, 'ar'], ['Maryland CHART', fetchMaryland, 'md'],
+  ['webcams.bg', fetchWebcamsBg, 'bg'], ['free-webcambg.com', fetchFreeWebcamBg, 'fwbg'],
   ['YouTube (curated)', loadYoutube, 'yt'],
 ];
+// ONLY=bg,fwbg runs just those sources (handy with DRY=1, which reports without writing anything).
+if (process.env.ONLY) {
+  const only = new Set(process.env.ONLY.split(','));
+  for (let i = jobs.length - 1; i >= 0; i--) if (!only.has(jobs[i][2])) jobs.splice(i, 1);
+}
 // GEO_BLOCKED=ca,ut,… : sources this network can't reach. They're skipped here and their cams are kept from the
 // previous build (which `node scripts/merge-remote.mjs` fills from the GitHub US-network build).
 const GEO_BLOCKED = new Set((process.env.GEO_BLOCKED || '').split(',').map(s => s.trim()).filter(Boolean));
@@ -247,9 +363,10 @@ const results = await Promise.all(jobs.map(async ([label, fn]) => {
 let cams = results.flatMap(r => r || []);
 
 // A source that is down (or blocks this network) keeps its cameras from the previous build.
-if (previous?.cams) {
+// (Not in ONLY mode: that run is about the selected sources alone.)
+if (previous?.cams && !process.env.ONLY) {
   const have = new Set(cams.map(c => c.s));
-  const keepOld = previous.cams.filter(c => !have.has(c.s) && SOURCES[c.s] && (c.k === 'hls' || c.k === 'yt' || c.k === 'windy'));
+  const keepOld = previous.cams.filter(c => !have.has(c.s) && SOURCES[c.s] && ['hls', 'yt', 'windy', 'iframe', 'mjpeg'].includes(c.k));
   if (keepOld.length) { cams = cams.concat(keepOld); console.log(`↺ kept ${keepOld.length} cams from the previous build for sources that failed this time`); }
 }
 
@@ -284,7 +401,7 @@ if (!process.env.SKIP_HEALTH) cams = await healthCheck(cams);
 const MIN_SPACING_KM = Number(process.env.MIN_SPACING_KM ?? 1.0);
 const seenMedia = new Set();
 cams = cams.filter(c => {
-  const key = String(c.yt || c.w || c.v).replace(/[?#].*$/, '').toLowerCase();
+  const key = String(c.yt || c.w || c.v || c.e || c.m).replace(/[?#].*$/, '').toLowerCase();
   if (seenMedia.has(key)) return false;
   seenMedia.add(key);
   return true;
@@ -316,6 +433,12 @@ for (const c of cams) {
 console.log(`De-dup: dropped ${dropped} same-road repeats (< ${MIN_SPACING_KM} km apart).`);
 cams = kept;
 
+if (process.env.DRY) {
+  const fresh = cams.filter(c => process.env.ONLY?.split(',').includes(c.s));
+  console.log(`\nDRY run, nothing written. ${fresh.length} cams from ${process.env.ONLY || 'all sources'}:`);
+  for (const c of fresh.slice(0, 400)) console.log(`  [${c.s}] ${c.k.padEnd(6)} ${c.t.slice(0, 50).padEnd(50)} ${c.v || c.e || c.m || c.yt || ''}`);
+  process.exit(0);
+}
 await mkdir(dirname(OUT), { recursive: true });
 await writeFile(OUT, JSON.stringify({ built: new Date().toISOString(), sources: SOURCES, cams }));
 const by = {};

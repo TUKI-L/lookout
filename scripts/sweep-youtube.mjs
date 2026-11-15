@@ -128,7 +128,10 @@ async function search(q) {
 const embeddable = async id => (await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent('https://www.youtube.com/watch?v=' + id)}`, { headers: { 'User-Agent': UA } })).ok;
 
 // ---------- run ----------
-console.log(`Sweeping ${queries.length} queries across ${new Set(queries.map(q => q[0])).size} countries…`);
+// --skip=N resumes an interrupted sweep (progress is saved every 25 queries; streams already found are skipped anyway).
+const skip = Number(process.argv.find(a => a.startsWith('--skip='))?.split('=')[1] || 0);
+if (skip) queries.splice(0, skip);
+console.log(`Sweeping ${queries.length} queries across ${new Set(queries.map(q => q[0])).size} countries${skip ? ` (resuming after ${skip})` : ''}…`);
 const found = [];
 let n = 0;
 const save = async () => writeFile(OUT, JSON.stringify(existing.concat(found), null, 1));
