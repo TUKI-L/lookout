@@ -194,11 +194,19 @@ const SOURCES = {
 };
 
 const jobs = [
-  ...SITES_511.map(s => [s[2], () => fetch511(s)]),
-  ...CARS.map(c => [c[1], () => fetchCars(c)]),
-  ['MoDOT', fetchMissouri], ['DelDOT', fetchDelaware], ['Caltrans', fetchCaltrans],
-  ['YouTube (curated)', loadYoutube],
+  // [label, fetcher, source key]
+  ...SITES_511.map(s => [s[2], () => fetch511(s), s[0]]),
+  ...CARS.map(c => [c[1], () => fetchCars(c), `cars_${c[0]}`]),
+  ['MoDOT', fetchMissouri, 'mo'], ['DelDOT', fetchDelaware, 'de'], ['Caltrans', fetchCaltrans, 'ca'],
+  ['YouTube (curated)', loadYoutube, 'yt'],
 ];
+// GEO_BLOCKED=ca,ut,… : sources this network can't reach. They're skipped here and their cams are kept from the
+// previous build (which `node scripts/merge-remote.mjs` fills from the GitHub US-network build).
+const GEO_BLOCKED = new Set((process.env.GEO_BLOCKED || '').split(',').map(s => s.trim()).filter(Boolean));
+if (GEO_BLOCKED.size) {
+  console.log(`(GEO_BLOCKED: reusing ${[...GEO_BLOCKED].join(', ')} from the previous build)`);
+  for (let i = jobs.length - 1; i >= 0; i--) if (GEO_BLOCKED.has(jobs[i][2])) jobs.splice(i, 1);
+}
 // SKIP_WINDY=1 reuses the Windy cams from the previous build (the full scan takes a while).
 if (process.env.SKIP_WINDY) console.log('(SKIP_WINDY set: reusing Windy cams from the previous build)');
 else if (process.env.WINDY_API_KEY) jobs.push(['Windy (live only)', () => fetchWindy(process.env.WINDY_API_KEY)]);

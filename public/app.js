@@ -66,7 +66,9 @@
   // ---------- map ----------
   const map = new maplibregl.Map({
     container: 'map', style: STYLE_URL, center: [-40, 28], zoom: 1.7, maxPitch: 70,
-    attributionControl: { compact: true }, renderWorldCopies: false,
+    // Windy's terms ask for this credit wherever its webcams appear.
+    attributionControl: { compact: true, customAttribution: 'Webcams provided by <a href="https://www.windy.com/" target="_blank" rel="noopener">windy.com</a>' },
+    renderWorldCopies: false,
   });
   map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'bottom-right');
   // If the page loads in a hidden tab the container measures 0×0 and the canvas sticks at a fallback size.
@@ -154,12 +156,13 @@
 
   // ---------- filters ----------
   const passes = c => state.cats.has(c.c) && state.srcs.has(c.s);
-  function applyFilters() {
+  function applyFilters(persist = true) {
     const filter = ['all', ['in', ['get', 'c'], ['literal', [...state.cats]]], ['in', ['get', 's'], ['literal', [...state.srcs]]]];
     for (const id of ['cams-glow', 'cams-dot']) if (map.getLayer(id)) map.setFilter(id, filter);
     state.visible = state.cams.filter(passes);
     $('statShown').textContent = state.visible.length.toLocaleString();
-    store.set('cats', [...state.cats]); store.set('srcs', [...state.srcs]);
+    // Don't save the auto-hidden (unreachable) sources as the viewer's own choice.
+    if (persist) { store.set('cats', [...state.cats]); store.set('srcs', [...new Set([...state.srcs, ...(state.unreachable || [])])]); }
     const counts = {};
     for (const c of state.cams) if (state.srcs.has(c.s)) counts[c.c] = (counts[c.c] || 0) + 1;
     document.querySelectorAll('.chip').forEach(ch => (ch.querySelector('.n').textContent = (counts[ch.dataset.cat] || 0).toLocaleString()));
@@ -180,7 +183,8 @@
     const keys = Object.keys(state.sources).filter(k => srcCounts[k]).sort((a, b) => srcCounts[b] - srcCounts[a]);
     $('srcList').replaceChildren(...keys.map(k => el('li', {}, el('label', {},
       el('input', { type: 'checkbox', checked: state.srcs.has(k), onchange: e => { e.target.checked ? state.srcs.add(k) : state.srcs.delete(k); applyFilters(); } }),
-      el('span', {}, state.sources[k].name), el('span', { class: 'n' }, srcCounts[k].toLocaleString())))));
+      el('span', {}, state.sources[k].name, state.unreachable?.has(k) ? el('span', { class: 'dim' }, ' · blocked on your network') : null),
+      el('span', { class: 'n' }, srcCounts[k].toLocaleString())))));
     $('srcCount').textContent = `${keys.length} feeds`;
     const setAll = on => { for (const k of keys) on ? state.srcs.add(k) : state.srcs.delete(k);
       document.querySelectorAll('#srcList input').forEach(i => (i.checked = on)); applyFilters(); };
@@ -262,6 +266,30 @@
         box.replaceChildren();
       },
     };
+  }
+
+  // ---------- per-viewer reachability ----------
+  // Some state DOTs geo-block foreign networks. Shortly after load, test-fetch two playlists per traffic
+  // source from the viewer's own browser; sources that can't be reached are hidden for this viewer only.
+  state.unreachable = new Set();
+  async function probeSources() {
+    const bySrc = {};
+    for (const c of state.cams) if (c.k === 'hls') (bySrc[c.s] ||= []).push(c);
+    const ok = async c => {
+      try { const r = await fetch(c.v, { signal: AbortSignal.timeout(7000), cache: 'no-store' }); return r.ok && (await r.text()).startsWith('#EXTM3U'); }
+      catch { return false; }
+    };
+    await Promise.all(Object.entries(bySrc).map(async ([s, list]) => {
+      const sample = [list[Math.floor(list.length * 0.25)], list[Math.floor(list.length * 0.75)]];
+      const results = await Promise.all(sample.map(ok));
+      if (!results.some(Boolean)) state.unreachable.add(s);
+    }));
+    if (!state.unreachable.size) return;
+    let hidden = 0;
+    for (const s of state.unreachable) { state.srcs.delete(s); hidden += bySrc[s].length; }
+    applyFilters(false);
+    renderFilters();
+    toast(`Hid ${hidden.toLocaleString()} cams your network can't reach (${[...state.unreachable].map(s => state.sources[s]?.name || s).join(', ')})`);
   }
 
   // ---------- viewer ----------
@@ -508,13 +536,13 @@
     updateWallCount();
     $('statTotal').textContent = state.cams.length.toLocaleString();
     $('statScenic').textContent = state.cams.filter(c => c.k !== 'hls').length.toLocaleString();
-    if (state.cams.some(c => c.s === 'windy')) map.addControl(new maplibregl.AttributionControl({ customAttribution: 'Webcams provided by <a href="https://www.windy.com/" target="_blank" rel="noopener">windy.com</a>', compact: true }));
     const m = location.hash.match(/^#cam=(.+)$/);
     const linked = m && state.byKey.get(decodeURIComponent(m[1]));
     if (linked) select(linked.i);
     else map.easeTo({ center: [-60, 30], zoom: 1.9, duration: 2500 });
     $('boot').classList.add('done');
     setTimeout(() => $('boot').remove(), 700);
+    setTimeout(probeSources, 1500);
   }).catch(err => {
     console.error(err);
     $('boot').querySelector('p').textContent = 'Could not load the camera list. Run the local server (npm start) instead of opening the file directly.';
